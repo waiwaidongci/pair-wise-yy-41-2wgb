@@ -38,7 +38,12 @@ class Repository:
                     external_ref TEXT,
                     created_by TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    last_decision_result TEXT,
+                    last_decision_reason TEXT,
+                    last_decision_notice_ref TEXT,
+                    last_decision_actor TEXT,
+                    last_decision_at TEXT
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS ux_items_external_ref
                     ON items(external_ref) WHERE external_ref IS NOT NULL;
@@ -66,6 +71,18 @@ class Repository:
                     created_at TEXT NOT NULL
                 );
             """)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        with self._lock:
+            columns = {row["name"] for row in
+                       self.conn.execute("PRAGMA table_info(items)").fetchall()}
+            for name in ("last_decision_result", "last_decision_reason",
+                         "last_decision_notice_ref", "last_decision_actor",
+                         "last_decision_at"):
+                if name not in columns:
+                    with self.conn:
+                        self.conn.execute(f"ALTER TABLE items ADD COLUMN {name} TEXT")
 
     @staticmethod
     def _item(row: sqlite3.Row) -> Dict[str, Any]:
@@ -112,7 +129,10 @@ class Repository:
         now = utc_now()
         with self._lock, self.conn:
             cur = self.conn.execute(
-                """UPDATE items SET status=?, version=version+1, updated_at=?
+                """UPDATE items SET status=?, version=version+1, updated_at=?,
+                   last_decision_result=NULL, last_decision_reason=NULL,
+                   last_decision_notice_ref=NULL, last_decision_actor=NULL,
+                   last_decision_at=NULL
                    WHERE id=? AND version=?""",
                 (target, now, item_id, expected_version),
             )
@@ -122,6 +142,35 @@ class Repository:
                     raise NotFoundError("项目不存在")
                 raise ConflictError("版本冲突，请刷新后重试")
         return self.get_item(item_id)
+
+    def record_decision_failure(self, item_id: int, reason: str,
+                                notice_ref: Optional[str], actor: str) -> None:
+        now = utc_now()
+        with self._lock, self.conn:
+            self.conn.execute(
+                """UPDATE items SET last_decision_result='rejected',
+                   last_decision_reason=?, last_decision_notice_ref=?,
+                   last_decision_actor=?, last_decision_at=? WHERE id=?""",
+                (reason, notice_ref, actor, now, item_id),
+            )
+
+    def get_notice(self, item_id: int, notice_ref: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self.conn.execute(
+                """SELECT * FROM records WHERE item_id=? AND kind='traffic_notice'
+                   AND external_ref=?""",
+                (item_id, notice_ref),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def notice_exists_elsewhere(self, item_id: int, notice_ref: str) -> bool:
+        with self._lock:
+            row = self.conn.execute(
+                """SELECT 1 FROM records WHERE kind='traffic_notice'
+                   AND external_ref=? AND item_id<>? LIMIT 1""",
+                (notice_ref, item_id),
+            ).fetchone()
+        return row is not None
 
     def add_record(self, item_id: int, kind: str, detail: str, status: str,
                    external_ref: Optional[str], actor: str) -> Dict[str, Any]:
@@ -139,6 +188,26 @@ class Repository:
             raise ConflictError("记录唯一标识已存在") from exc
         with self._lock:
             row = self.conn.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone()
+        return dict(row)
+
+    def close_record(self, item_id: int, record_id: int) -> Dict[str, Any]:
+        self.get_item(item_id)
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                """UPDATE records SET status='closed'
+                   WHERE id=? AND item_id=? AND status='open'""",
+                (record_id, item_id),
+            )
+            if cur.rowcount == 0:
+                exists = self.conn.execute(
+                    "SELECT 1 FROM records WHERE id=? AND item_id=?",
+                    (record_id, item_id),
+                ).fetchone()
+                if exists is None:
+                    raise NotFoundError("记录不存在")
+                raise ConflictError("记录已关闭")
+            row = self.conn.execute("SELECT * FROM records WHERE id=?",
+                                    (record_id,)).fetchone()
         return dict(row)
 
     def list_records(self, item_id: int) -> List[Dict[str, Any]]:

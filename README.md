@@ -29,10 +29,11 @@ python3 app.py --db ./data.db --port 8318
 - `POST /api/items`
 - `GET /api/items/{id}`
 - `POST /api/items/{id}/records`
-- `POST /api/items/{id}/transition`，必须提交`expected_version`
+- `POST /api/items/{id}/records/{record_id}/close`
+- `POST /api/items/{id}/transition`，必须提交`expected_version`；目标为`restricted`或`closed`时必须提交`notice_ref`
 - `GET /api/audit`
 
-允许角色：sensor_operator, bridge_engineer, traffic_authority, viewer。监测偏差与预警阈值之比和多条异常记录决定告警等级；限行与封闭决策必须绑定交通通告记录。
+允许角色：sensor_operator, bridge_engineer, traffic_authority, viewer。监测偏差与预警阈值之比和多条异常记录决定告警等级；限行与封闭决策必须绑定交通通告记录。巡检人员以`kind=traffic_notice`、编号写入`external_ref`登记通告；通告不存在、已关闭或属于其他桥梁时决策被拒绝，原状态保持不变，最近一次失败原因写入`last_decision`并在页面展示；核对通过后状态更新，通告编号写入审计明细。
 
 ## 测试
 

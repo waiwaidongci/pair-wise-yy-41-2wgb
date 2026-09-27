@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from .domain import ensure_role, normalize_severity, require_number, require_text
+from .domain import (ConflictError, DomainError, NotFoundError, ValidationError,
+                     ensure_role, normalize_severity, require_number, require_text)
 from .repository import Repository
-from .rules import (AUDIT_ROLES, CREATE_ROLES, ENTITY, RECORD_ROLES, TITLE,
-                    VIEW_ROLES, completion_blockers, escalation_required,
-                    priority_score, response_deadline_hours, role_for_transition,
+from .rules import (AUDIT_ROLES, CREATE_ROLES, ENTITY, NOTICE_KIND,
+                    NOTICE_REQUIRED_TARGETS, RECORD_ROLES, TITLE, VIEW_ROLES,
+                    completion_blockers, escalation_required, priority_score,
+                    response_deadline_hours, role_for_transition,
                     validate_transition)
 
 
@@ -48,6 +50,8 @@ class Service:
         external_ref = payload.get("external_ref")
         if external_ref is not None:
             external_ref = require_text(external_ref, "external_ref", 100)
+        if kind == NOTICE_KIND and external_ref is None:
+            raise ValidationError("交通通告必须提供编号external_ref")
         record = self.repository.add_record(item_id, kind, detail, status,
                                             external_ref, actor)
         self.repository.append_audit("record", ENTITY, item_id, actor, {
@@ -55,24 +59,58 @@ class Service:
         })
         return record
 
+    def close_record(self, item_id: int, record_id: int, actor: str,
+                     role: str) -> Dict[str, Any]:
+        ensure_role(role, RECORD_ROLES)
+        actor = require_text(actor, "actor", 100)
+        record = self.repository.close_record(item_id, record_id)
+        self.repository.append_audit("record_close", ENTITY, item_id, actor, {
+            "record_id": record["id"], "kind": record["kind"],
+        })
+        return record
+
+    def _reject_decision(self, item_id: int, reason: str,
+                         notice_ref: Optional[str], actor: str,
+                         error: DomainError) -> None:
+        self.repository.record_decision_failure(item_id, reason, notice_ref, actor)
+        raise error
+
     def transition(self, item_id: int, target: str, expected_version: int,
-                   actor: str, role: str) -> Dict[str, Any]:
+                   actor: str, role: str,
+                   notice_ref: Optional[str] = None) -> Dict[str, Any]:
         actor = require_text(actor, "actor", 100)
         item = self.repository.get_item(item_id)
         validate_transition(item["status"], target)
         ensure_role(role, role_for_transition(target))
         if not isinstance(expected_version, int) or expected_version < 1:
             raise ValueError("expected_version必须是正整数")
+        if target in NOTICE_REQUIRED_TARGETS:
+            if notice_ref is None:
+                raise ValidationError("限行或封闭决策必须提供交通通告编号notice_ref")
+            notice_ref = require_text(notice_ref, "notice_ref", 100)
+            notice = self.repository.get_notice(item_id, notice_ref)
+            if notice is None:
+                if self.repository.notice_exists_elsewhere(item_id, notice_ref):
+                    self._reject_decision(item_id, "交通通告属于其他桥梁",
+                                          notice_ref, actor,
+                                          ConflictError("交通通告属于其他桥梁"))
+                self._reject_decision(item_id, "交通通告不存在", notice_ref, actor,
+                                      NotFoundError("交通通告不存在"))
+            if notice["status"] != "open":
+                self._reject_decision(item_id, "交通通告已关闭", notice_ref, actor,
+                                      ConflictError("交通通告已关闭"))
         blockers = completion_blockers(target, self.repository.open_record_count(item_id))
         if blockers:
-            from .domain import ConflictError
             raise ConflictError("；".join(blockers))
         updated = self.repository.transition_item(item_id, target, expected_version, actor)
-        self.repository.append_audit("transition", ENTITY, item_id, actor, {
+        detail = {
             "from": item["status"], "to": target,
             "escalation_required": escalation_required(
                 item["severity"], item["quantity"], item["threshold"]),
-        })
+        }
+        if notice_ref is not None:
+            detail["notice_ref"] = notice_ref
+        self.repository.append_audit("transition", ENTITY, item_id, actor, detail)
         return self.enrich(updated)
 
     def get_item(self, item_id: int, role: str) -> Dict[str, Any]:
@@ -100,4 +138,13 @@ class Service:
             item["severity"], item["quantity"], item["threshold"])
         result["escalation_required"] = escalation_required(
             item["severity"], item["quantity"], item["threshold"])
+        result["last_decision"] = None
+        if item.get("last_decision_result"):
+            result["last_decision"] = {
+                "result": item["last_decision_result"],
+                "reason": item["last_decision_reason"],
+                "notice_ref": item["last_decision_notice_ref"],
+                "actor": item["last_decision_actor"],
+                "at": item["last_decision_at"],
+            }
         return result

@@ -15,7 +15,10 @@ class FailureTest(unittest.TestCase):
         payload={"kind":"action","detail":"same reference","status":"open","external_ref":"DUP-1"}
         self.service.add_record(self.item["id"],payload,"recorder",'sensor_operator')
         with self.assertRaises(ConflictError): self.service.add_record(self.item["id"],payload,"recorder",'sensor_operator')
+        self.service.add_record(self.item["id"],{"kind":"traffic_notice","detail":"restriction basis","status":"open","external_ref":"TN-FAIL-1"},"inspector",'bridge_engineer')
         current=self.service.get_item(self.item["id"],"viewer")
-        for target in STATES[1:-1]: current=self.service.transition(current["id"],target,current["version"],"reviewer",TRANSITION_ROLES[target][0])
+        for target in STATES[1:-1]:
+            notice_ref="TN-FAIL-1" if target in ("restricted","closed") else None
+            current=self.service.transition(current["id"],target,current["version"],"reviewer",TRANSITION_ROLES[target][0],notice_ref)
         with self.assertRaises(ConflictError): self.service.transition(current["id"],STATES[-1],current["version"],"reviewer",TRANSITION_ROLES[STATES[-1]][0])
 if __name__=="__main__": unittest.main()

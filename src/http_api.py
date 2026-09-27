@@ -113,12 +113,18 @@ def make_handler(service: Service, static_dir: str):
                 elif path.startswith("/api/items/") and path.endswith("/records"):
                     item_id = int(path.split("/")[3])
                     self._json(201, service.add_record(item_id, body, actor, role))
+                elif (path.startswith("/api/items/") and "/records/" in path
+                      and path.endswith("/close")):
+                    parts = path.split("/")
+                    item_id, record_id = int(parts[3]), int(parts[5])
+                    self._json(200, service.close_record(item_id, record_id, actor, role))
                 elif path.startswith("/api/items/") and path.endswith("/transition"):
                     item_id = int(path.split("/")[3])
                     target = body.get("target")
                     expected = body.get("expected_version")
+                    notice_ref = body.get("notice_ref")
                     self._json(200, service.transition(
-                        item_id, target, expected, actor, role))
+                        item_id, target, expected, actor, role, notice_ref))
                 else:
                     self._json(404, {"error": "not_found"})
             except Exception as exc:

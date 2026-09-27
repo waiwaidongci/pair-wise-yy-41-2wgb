@@ -3,7 +3,7 @@ from pathlib import Path
 from src.domain import ConflictError, PermissionDenied
 from src.repository import Repository
 from src.service import Service
-from src.rules import STATES, TRANSITION_ROLES
+from src.rules import NOTICE_KIND, STATES, TRANSITION_ROLES
 class FailureTest(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(); self.repo=Repository(str(Path(self.tmp.name)/"test.db")); self.service=Service(self.repo)
@@ -15,7 +15,8 @@ class FailureTest(unittest.TestCase):
         payload={"kind":"action","detail":"same reference","status":"open","external_ref":"DUP-1"}
         self.service.add_record(self.item["id"],payload,"recorder",'sensor_operator')
         with self.assertRaises(ConflictError): self.service.add_record(self.item["id"],payload,"recorder",'sensor_operator')
+        self.service.add_record(self.item["id"],{"kind":NOTICE_KIND,"detail":"traffic notice","status":"open","external_ref":"NT-9"},"recorder",'sensor_operator')
         current=self.service.get_item(self.item["id"],"viewer")
-        for target in STATES[1:-1]: current=self.service.transition(current["id"],target,current["version"],"reviewer",TRANSITION_ROLES[target][0])
+        for target in STATES[1:-1]: current=self.service.transition(current["id"],target,current["version"],"reviewer",TRANSITION_ROLES[target][0],notice_no="NT-9")
         with self.assertRaises(ConflictError): self.service.transition(current["id"],STATES[-1],current["version"],"reviewer",TRANSITION_ROLES[STATES[-1]][0])
 if __name__=="__main__": unittest.main()

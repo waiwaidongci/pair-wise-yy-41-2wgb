@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from .audit import make_entry, utc_now
 from .domain import ConflictError, NotFoundError
-from .rules import ID_PREFIX, STATES
+from .rules import ID_PREFIX, NOTICE_KIND, STATES
 
 
 class Repository:
@@ -63,6 +63,15 @@ class Repository:
                     detail TEXT NOT NULL,
                     previous_hash TEXT NOT NULL,
                     entry_hash TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS decision_failures (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER NOT NULL,
+                    target TEXT NOT NULL,
+                    notice_no TEXT,
+                    actor TEXT NOT NULL,
+                    reason TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
             """)
@@ -149,13 +158,47 @@ class Repository:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def open_record_count(self, item_id: int) -> int:
+    def open_action_count(self, item_id: int) -> int:
+        # 交通通告是决策授权依据，不计入阻止关闭流程的未关闭事项
         with self._lock:
             row = self.conn.execute(
-                "SELECT COUNT(*) AS n FROM records WHERE item_id=? AND status='open'",
-                (item_id,),
+                """SELECT COUNT(*) AS n FROM records
+                   WHERE item_id=? AND status='open' AND kind!=?""",
+                (item_id, NOTICE_KIND),
             ).fetchone()
         return int(row["n"])
+
+    def find_notices(self, notice_no: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM records WHERE kind=? AND external_ref=? ORDER BY id",
+                (NOTICE_KIND, notice_no),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_decision_failure(self, item_id: int, target: str,
+                                notice_no: Optional[str], actor: str,
+                                reason: str) -> Dict[str, Any]:
+        now = utc_now()
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                """INSERT INTO decision_failures(item_id, target, notice_no, actor,
+                   reason, created_at) VALUES(?,?,?,?,?,?)""",
+                (item_id, target, notice_no, actor, reason, now),
+            )
+            failure_id = int(cur.lastrowid)
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM decision_failures WHERE id=?", (failure_id,)
+            ).fetchone()
+        return dict(row)
+
+    def last_decision_failure(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM decision_failures ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     def append_audit(self, action: str, entity_type: str, entity_id: int,
                      actor: str, detail: dict) -> Dict[str, Any]:
